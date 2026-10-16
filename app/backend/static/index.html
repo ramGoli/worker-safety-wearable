@@ -1,0 +1,673 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Worker Safety · Supervisor console</title>
+<script>
+  // Theme before first paint: the supervisor's saved choice, else the OS setting.
+  document.documentElement.dataset.theme = localStorage.getItem("theme")
+    || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+</script>
+<style>
+  /* Two selected themes from one set of roles (light / dark steps of the same ramps). Status colors are fixed. */
+  :root {
+    color-scheme: light;
+    --page:#f2f2ef; --surface:#fcfcfb; --surface-2:#f4f4f1; --chip:#ebeae6; --hover:#efeee9;
+    --ink:#0b0b0b; --ink-2:#52514e; --muted:#6f6d68; --line:#e1e0d9; --border:rgba(11,11,11,.10); --border-strong:rgba(11,11,11,.18);
+    --accent:#256abf; --series:#2a78d6; --track:#dbe8f9;
+    --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b; --offline:#898781;
+    --critical-soft:rgba(208,59,59,.12); --warning-soft:rgba(250,178,25,.18);
+    --shadow:0 1px 2px rgba(11,11,11,.04), 0 8px 24px rgba(11,11,11,.06);
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:#0d0d0d; --surface:#1a1a19; --surface-2:#212120; --chip:#2c2c2a; --hover:#262624;
+    --ink:#ffffff; --ink-2:#c3c2b7; --muted:#9a988f; --line:#2c2c2a; --border:rgba(255,255,255,.10); --border-strong:rgba(255,255,255,.18);
+    --accent:#2a78d6; --series:#3987e5; --track:#1f3352;
+    --critical-soft:rgba(208,59,59,.22); --warning-soft:rgba(250,178,25,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--page); color:var(--ink);
+         -webkit-font-smoothing:antialiased; }
+  button, input, select { font:inherit; color:inherit; }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+
+  /* Top bar */
+  .topbar { position:sticky; top:0; z-index:20; height:56px; display:flex; align-items:center; gap:16px; padding:0 24px;
+            background:var(--surface); border-bottom:1px solid var(--border); }
+  .brand { display:flex; align-items:baseline; gap:10px; }
+  .brand b { font-size:15px; font-weight:650; letter-spacing:-.01em; }
+  .brand span { color:var(--ink-2); font-size:13px; }
+  .live { display:inline-flex; align-items:center; gap:8px; color:var(--ink-2); font-size:13px; font-variant-numeric:tabular-nums; }
+  .live i { width:8px; height:8px; border-radius:50%; background:var(--good); }
+  .live.down i { background:var(--warning); }
+  .topbar .spacer { flex:1; }
+  .topbar .group { display:flex; align-items:center; gap:8px; }
+  .divider { width:1px; height:24px; background:var(--border); }
+
+  /* Buttons: neutral by default; blue for the main action; red only for site-wide danger and alarms */
+  button { display:inline-flex; align-items:center; justify-content:center; gap:6px; height:32px; padding:0 12px;
+           border-radius:8px; border:1px solid var(--border-strong); background:var(--surface); font-size:13px; font-weight:500;
+           cursor:pointer; white-space:nowrap; }
+  button:hover { background:var(--hover); }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.primary:hover { filter:brightness(1.08); }
+  button.danger { background:var(--critical); border-color:var(--critical); color:#fff; }
+  button.danger:hover { filter:brightness(1.08); }
+  button.ghost { border-color:transparent; background:transparent; color:var(--ink-2); }
+  button.ghost:hover { background:var(--hover); color:var(--ink); }
+  button.icon { width:32px; padding:0; }
+  button[aria-expanded="true"] { background:var(--chip); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  svg.i { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.75; stroke-linecap:round; stroke-linejoin:round; }
+
+  /* Page + Genie drawer */
+  .shell { display:flex; align-items:flex-start; }
+  .content { flex:1; min-width:0; padding:20px 24px 8px; container-type:inline-size; }
+  .drawer { position:sticky; top:56px; flex:none; width:min(540px, 42vw); height:calc(100vh - 56px); display:flex; flex-direction:column;
+            background:var(--surface); border-left:1px solid var(--border); }
+  .drawer[hidden] { display:none; }
+  .drawer header { display:flex; align-items:center; gap:10px; padding:12px 12px 12px 18px; border-bottom:1px solid var(--border); }
+  .drawer header div { flex:1; min-width:0; }
+  .drawer header b { display:block; font-size:14px; font-weight:600; }
+  .drawer header span { color:var(--ink-2); font-size:12px; }
+  .drawer header a { font-size:12px; }
+  .drawer iframe { flex:1; width:100%; border:0; background:#fff; }
+  .drawer .empty { padding:18px; color:var(--ink-2); }
+  @media (max-width: 1100px) {
+    .drawer { position:fixed; right:0; top:56px; z-index:30; width:min(560px, 100vw); box-shadow:var(--shadow); }
+  }
+
+  /* KPI tiles */
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; margin-bottom:16px; }
+  .kpi { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:14px 16px; }
+  .kpi .label { color:var(--ink-2); font-size:13px; }
+  .kpi .value { font-size:28px; font-weight:600; letter-spacing:-.02em; margin:4px 0 2px; }
+  .kpi .sub { color:var(--muted); font-size:12px; }
+  .kpi.alert { border-color:var(--critical); box-shadow:inset 0 0 0 1px var(--critical); }
+  .kpi.alert .value { color:var(--critical); }
+
+  /* Layout: map + workers on the left; incidents, risk and messaging on the right. One column when narrow. */
+  .grid { display:grid; grid-template-columns:minmax(0, 2fr) minmax(320px, 1fr); gap:16px; align-items:start; }
+  .col { display:grid; gap:16px; min-width:0; }
+  /* One column: the cards join a single list, and incidents (what needs acting on) come first */
+  @container (max-width: 1180px) {
+    .grid { grid-template-columns:minmax(0, 1fr); } .col { display:contents; }
+    .c-incidents { order:1; } .c-map { order:2; } .c-workers { order:3; } .c-risk { order:4; } .c-message { order:5; }
+  }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:16px 18px; min-width:0; }
+  .card > h2 { display:flex; align-items:baseline; gap:8px; margin:0 0 12px; font-size:14px; font-weight:600; }
+  .card > h2 .sub { margin-left:auto; color:var(--ink-2); font-size:12px; font-weight:400; }
+  .meta { color:var(--ink-2); font-size:12px; }
+  .empty-note { color:var(--ink-2); font-size:13px; padding:8px 0; }
+  .wide { margin-top:16px; }
+
+  /* Status badges: always a label beside the color */
+  .badge { display:inline-flex; align-items:center; gap:6px; height:22px; padding:0 9px; border-radius:999px; background:var(--chip);
+           color:var(--ink); font-size:12px; font-weight:600; white-space:nowrap; }
+  .badge i { width:7px; height:7px; border-radius:50%; flex:none; }
+  .badge.good i { background:var(--good); } .badge.offline i { background:var(--offline); }
+  .badge.offline { color:var(--ink-2); font-weight:500; }
+  .badge.warning { background:var(--warning-soft); } .badge.warning i { background:var(--warning); }
+  .badge.acked { background:var(--critical-soft); } .badge.acked i { background:var(--critical); }
+  .badge.critical { background:var(--critical); color:#fff; } .badge.critical i { background:#fff; animation:beat 1.2s ease-in-out infinite; }
+  @keyframes beat { 50% { transform:scale(.55); opacity:.6; } }
+
+  /* Worker cards (real sticks, and anyone in an incident) */
+  .workers { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:12px; }
+  .worker { border:1px solid var(--border); border-radius:10px; padding:14px; background:var(--surface); container-type:inline-size; }
+  .worker.alarm { border-color:var(--critical); box-shadow:inset 0 0 0 1px var(--critical), 0 0 0 4px var(--critical-soft); }
+  .worker.acked { border-color:var(--critical); }
+  .worker.responding { border-color:var(--warning); box-shadow:inset 0 0 0 1px var(--warning); }
+  .worker.offline { opacity:.72; }
+  .worker .head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .worker .name { font-size:16px; font-weight:600; letter-spacing:-.01em; }
+  .worker .meta { margin-top:2px; }
+  .worker .body { display:grid; gap:12px; margin-top:12px; }
+  @container (min-width: 620px) { .worker .body { grid-template-columns:1.15fr 1fr; gap:24px; } }
+  .trends { display:grid; grid-template-columns:64px 1fr 68px; gap:6px 10px; align-items:center; font-size:12px; color:var(--ink-2); }
+  .trends .now { color:var(--ink); text-align:right; font-variant-numeric:tabular-nums; }
+  svg.spark { width:100%; height:26px; display:block; overflow:visible; }
+  .facts { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; margin:0; font-size:13px; align-content:start; }
+  .facts dt { color:var(--ink-2); }
+  .facts dd { margin:0; }
+  .actions { display:flex; gap:8px; margin-top:14px; flex-wrap:wrap; }
+  .flag { font-weight:600; }
+  .flag::before { content:""; display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px; vertical-align:1px; background:var(--serious); }
+  .flag.over::before { background:var(--critical); }
+
+  /* Tables */
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; font-weight:500; color:var(--ink-2); font-size:12px; padding:8px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  tbody tr:last-child td { border-bottom:0; }
+  tbody tr:hover td { background:var(--surface-2); }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  td.time { font-variant-numeric:tabular-nums; color:var(--ink-2); white-space:nowrap; }
+  .crew { margin-top:16px; border-top:1px solid var(--line); padding-top:8px; }
+  .crew .more { margin-top:8px; }
+  .crew td { white-space:nowrap; }
+  .crew td.last { max-width:240px; overflow:hidden; text-overflow:ellipsis; }
+  .tablewrap { overflow-x:auto; }
+
+  /* Site map */
+  svg.map { width:100%; height:auto; display:block; }
+  .map .zone rect { fill:var(--surface-2); stroke:var(--line); stroke-width:1.5; }
+  .map .zone text { fill:var(--ink-2); font-size:15px; }
+  .map .zone text.zname { fill:var(--ink); font-weight:600; }
+  .map circle.dot { stroke:var(--surface); stroke-width:2; }
+  .map circle.ring { fill:none; stroke:var(--ink); stroke-width:2; }
+  .map circle.pulse { fill:none; stroke:var(--critical); stroke-width:2; animation:ping 1.4s ease-out infinite; transform-box:fill-box; transform-origin:center; }
+  @keyframes ping { from { transform:scale(.6); opacity:.9; } to { transform:scale(1.9); opacity:0; } }
+  .map text.dotlabel { fill:var(--ink); font-size:14px; font-weight:600; paint-order:stroke; stroke:var(--surface-2); stroke-width:4px; }
+  .legend { display:flex; flex-wrap:wrap; gap:16px; font-size:12px; color:var(--ink-2); margin-top:10px; }
+  .legend i { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:-1px; }
+
+  /* Incidents */
+  .incident { padding:12px 0; border-bottom:1px solid var(--line); }
+  .incident:first-child { padding-top:0; }
+  .incident:last-child { border-bottom:0; padding-bottom:0; }
+  .incident .top { display:flex; align-items:center; gap:8px; }
+  .incident .who { font-weight:600; }
+  .incident .when { margin-left:auto; color:var(--ink-2); font-size:12px; font-variant-numeric:tabular-nums; }
+  .incident .meta { margin-top:4px; }
+  .bar { display:flex; gap:2px; height:6px; border-radius:3px; overflow:hidden; background:var(--chip); }
+  .bar span { display:block; border-radius:3px; } .bar .fast { background:var(--series); } .bar .delta { background:#4a3aa7; } .bar .lake { background:#1baf7a; }
+  .lane { display:grid; grid-template-columns:72px 1fr auto; gap:10px; align-items:center; font-size:12px; color:var(--ink-2); margin-top:8px; }
+  .lane b { color:var(--ink); font-weight:600; }
+
+  /* Next-shift risk */
+  .riskrow { display:grid; grid-template-columns:minmax(0, 1fr) 72px; gap:2px 12px; padding:8px 0; border-bottom:1px solid var(--line); }
+  .riskrow:last-of-type { border-bottom:0; }
+  .riskrow .who { font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .riskrow .val { text-align:right; font-size:13px; white-space:nowrap; }
+  .riskrow .val.high { font-weight:650; }
+  .riskbar { grid-column:1 / -1; height:6px; border-radius:3px; background:var(--track); overflow:hidden; }
+  .riskbar span { display:block; height:100%; border-radius:3px; background:var(--series); }
+  .riskrow .why { grid-column:1 / -1; }
+  .modelnote { margin-top:10px; padding-top:10px; border-top:1px solid var(--line); }
+
+  /* Message composer */
+  .composer { display:grid; gap:10px; }
+  .composer label { color:var(--ink-2); font-size:12px; }
+  .composer select, .composer input { width:100%; height:36px; padding:0 10px; border-radius:8px; border:1px solid var(--border-strong);
+                                      background:var(--surface); }
+  .composer .row { display:flex; gap:8px; align-items:center; }
+  .composer .row .meta { margin-left:auto; font-variant-numeric:tabular-nums; }
+
+  /* Footer + toast */
+  .flow { padding:14px 24px 28px; color:var(--muted); font-size:12px; }
+  .flow[hidden] { display:none; }
+  .flow b { color:var(--ink-2); font-weight:600; }
+  .toast { position:fixed; left:24px; bottom:24px; z-index:40; max-width:420px; padding:10px 14px; border-radius:10px;
+           background:var(--ink); color:var(--surface); font-size:13px; box-shadow:var(--shadow); opacity:0; transform:translateY(8px);
+           transition:opacity .15s, transform .15s; pointer-events:none; }
+  .toast.show { opacity:1; transform:none; }
+  .toast.error { background:var(--critical); color:#fff; }
+  @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="brand"><b>Worker Safety</b><span>Supervisor console</span></div>
+  <span class="live" id="live"><i></i><span id="clock">Connecting…</span></span>
+  <span class="spacer"></span>
+  <div class="group">
+    <button class="ghost icon" id="theme-toggle" aria-label="Switch to dark theme" title="Switch theme">
+      <svg class="i" viewBox="0 0 24 24" id="theme-icon"></svg></button>
+    <button id="genie-toggle" aria-controls="genie-drawer" aria-expanded="false" disabled>
+      <svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>Ask Genie</button>
+    <span class="divider"></span>
+    <button data-action="command" data-dev="*" data-cmd="all_clear" data-msg="All clear">All clear</button>
+    <button class="danger" data-action="command" data-dev="*" data-cmd="evacuate" data-msg="Evacuate the site now">Evacuate site</button>
+  </div>
+</div>
+
+<div class="shell">
+  <div class="content">
+    <div class="kpis" id="kpis"></div>
+    <div class="grid">
+      <div class="col">
+        <section class="card c-map"><h2>Site map<span class="sub" id="map-sub"></span></h2><div id="map"></div></section>
+        <section class="card c-workers"><h2>Workers<span class="sub" id="workers-sub"></span></h2>
+          <div class="workers" id="workers"></div><div class="crew" id="crew"></div></section>
+      </div>
+      <div class="col">
+        <section class="card c-incidents"><h2>Incidents<span class="sub">last hour and anything still open</span></h2><div id="incidents"></div></section>
+        <section class="card c-risk"><h2>Next-shift risk<span class="sub">nightly model</span></h2><div id="risk"></div></section>
+        <section class="card c-message"><h2>Message a worker</h2>
+          <form class="composer" id="composer" autocomplete="off">
+            <div><label for="msg-to">To</label><select id="msg-to"><option value="*">Everyone</option></select></div>
+            <div><label for="msg-text">Message · shown on the stick</label>
+              <input id="msg-text" maxlength="40" placeholder="e.g. Lunch in 10 min"></div>
+            <div class="row"><button class="primary" type="submit">Send message</button><span class="meta" id="msg-count">0 / 40</span></div>
+          </form></section>
+      </div>
+    </div>
+    <section class="card wide"><h2>Alert log<span class="sub">alerts and messages sent to the sticks</span></h2>
+      <div class="tablewrap" id="alerts"></div></section>
+    <div class="flow" id="flow-zerobus">Data path: <b>M5StickC Plus2</b> → HTTPS → <b>Zerobus Ingest</b> → <b>Delta · Unity Catalog</b> →
+      stream → <b>Lakebase Postgres</b> → <b>Databricks App</b> → alert back to the stick</div>
+    <div class="flow" id="flow-app" hidden>Data path: <b>M5StickC Plus2</b> → HTTPS → <b>Databricks App</b> → <b>Lakebase Postgres</b> →
+      this console → alert back to the stick · Ask Genie reads the same Lakebase tables through Unity Catalog</div>
+  </div>
+  <aside class="drawer" id="genie-drawer" hidden aria-label="Ask Genie">
+    <header><div><b>Ask Genie</b><span>Worker Safety Assistant · live Lakebase data</span></div>
+      <a id="genie-open" target="_blank" rel="noopener">Open in Genie ↗</a>
+      <button class="ghost icon" id="genie-close" aria-label="Close Ask Genie">
+        <svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></header>
+    <iframe id="genie" title="Ask Genie" allow="clipboard-write"></iframe>
+  </aside>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const seenAt = {};      // event_id -> server time this console first saw the incident
+let primed = false;     // incidents already present on page load don't count toward screen latency
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const secs = (a, b) => (new Date(b) - new Date(a)) / 1000;
+let zerobusLane = true;  // from /api/state: false = the stick posts everything straight to the App
+let seriesFor = null;    // device ids whose sparkline data /api/state should include (null = everyone)
+let riskScores = {};     // device_id -> next-shift risk from the nightly job
+let state = null;        // last /api/state, so a toggle can redraw without waiting for the next poll
+let crewOpen = false;    // crew table shows the first CREW_ROWS until "Show all"
+const CREW_ROWS = 8, ALERT_GROUPS = 12;
+
+let toastTimer;
+function notice(text, tone) {
+  const t = document.getElementById("toast");
+  t.textContent = text;
+  t.className = `toast show${tone === "error" ? " error" : ""}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = "toast"; }, 4000);
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(path + " " + r.status);
+  return r.json();
+}
+
+const ALERT_LABEL = {help_coming: "Help is coming", evacuate: "Evacuate", all_clear: "All clear", message: "Message"};
+const alertText = c => c.command === "message" ? `Message “${esc(c.message || "")}”` : esc(ALERT_LABEL[c.command] || c.command);
+
+async function sendCommand(deviceId, command, message) {
+  const what = ALERT_LABEL[command] || command;
+  try {
+    const res = await api("/api/commands", {method: "POST", headers: {"Content-Type": "application/json"},
+                                            body: JSON.stringify({device_id: deviceId, command, message})});
+    if (res.ids.length) notice(`${what} sent to ${deviceId === "*" ? `everyone (${res.ids.length})` : "the stick"}`);
+    else notice("No devices have reported in yet", "error");
+    return res.ids.length > 0;
+  } catch (e) {
+    notice(`Couldn't send ${what.toLowerCase()}: ${e.message}`, "error");
+    return false;
+  }
+}
+
+// The composer sits outside everything tick() redraws, so typing survives the 1 s refresh.
+const msgTo = document.getElementById("msg-to"), msgText = document.getElementById("msg-text");
+msgText.addEventListener("input", () => { document.getElementById("msg-count").textContent = `${msgText.value.length} / 40`; });
+document.getElementById("composer").addEventListener("submit", async e => {
+  e.preventDefault();
+  const text = msgText.value.trim();
+  if (!text) { notice("Type a message first", "error"); return; }
+  if (await sendCommand(msgTo.value, "message", text)) {
+    msgText.value = "";
+    msgText.dispatchEvent(new Event("input"));
+  }
+});
+
+function updateRecipients(workers) {  // only rebuilt when the worker list changes, keeping the current choice
+  const ids = workers.map(w => w.device_id).join(",");
+  if (msgTo.dataset.ids === ids) return;
+  const chosen = msgTo.value;
+  msgTo.innerHTML = '<option value="*">Everyone</option>' + workers.map(w =>
+    `<option value="${esc(w.device_id)}">${esc(w.worker_name || w.device_id)}</option>`).join("");
+  msgTo.value = [...msgTo.options].some(o => o.value === chosen) ? chosen : "*";
+  msgTo.dataset.ids = ids;
+}
+
+// Theme toggle: remembered once chosen; until then the console follows the OS.
+const THEME_ICONS = {
+  light: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',  // in light mode, offer the moon
+  dark: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'};
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  document.getElementById("theme-icon").innerHTML = THEME_ICONS[theme];
+  document.getElementById("theme-toggle").setAttribute("aria-label", `Switch to ${theme === "dark" ? "light" : "dark"} theme`);
+}
+applyTheme(document.documentElement.dataset.theme);
+document.getElementById("theme-toggle").addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  localStorage.setItem("theme", next);
+  applyTheme(next);
+});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", e => {
+  if (!localStorage.getItem("theme")) applyTheme(e.matches ? "dark" : "light");
+});
+
+// Ask Genie: the native Genie UI in a side drawer. The iframe loads on first open and stays alive, so closing
+// the drawer keeps the conversation. It runs as the signed-in supervisor (they need access to the space and tables).
+const drawer = document.getElementById("genie-drawer"), genieFrame = document.getElementById("genie");
+const genieToggle = document.getElementById("genie-toggle");
+let genie = null;  // {embed_url, open_url} from /api/genie
+function setGenie(open) {
+  drawer.hidden = !open;
+  genieToggle.setAttribute("aria-expanded", String(open));
+  localStorage.setItem("genieOpen", open ? "1" : "");
+  if (open && genie && !genieFrame.getAttribute("src")) genieFrame.src = genie.embed_url;
+}
+genieToggle.addEventListener("click", () => setGenie(drawer.hidden));
+document.getElementById("genie-close").addEventListener("click", () => setGenie(false));
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !drawer.hidden) setGenie(false); });
+fetch("/api/genie").then(r => r.ok ? r.json() : Promise.reject(r.status)).then(g => {
+  genie = g;
+  document.getElementById("genie-open").href = g.open_url;
+  genieToggle.disabled = false;
+  setGenie(localStorage.getItem("genieOpen") === "1");
+}).catch(() => { genieToggle.title = "Genie isn't set up for this console"; });
+
+async function ackIncident(eventId) {
+  try {
+    await api(`/api/incidents/${encodeURIComponent(eventId)}/ack`, {method: "POST"});
+    notice("Incident acknowledged · the worker sees help is on the way");
+  } catch (e) {
+    notice(`Couldn't acknowledge: ${e.message}`, "error");
+  }
+}
+
+// The cards re-render every second, so a button can be replaced between press and release and the
+// browser drops the click. Act on the press instead; keyboard activation still arrives as a click.
+function runAction(b) {
+  if (b.dataset.action === "compose") {  // focus after the press, or the browser moves focus to the button
+    msgTo.value = b.dataset.dev;
+    setTimeout(() => msgText.focus(), 0);
+  }
+  if (b.dataset.action === "command") sendCommand(b.dataset.dev, b.dataset.cmd, b.dataset.msg);
+  if (b.dataset.action === "ack") ackIncident(b.dataset.id);
+  if (b.dataset.action === "crew") { crewOpen = !crewOpen; render(); }
+}
+document.addEventListener("pointerdown", e => {
+  const b = e.button === 0 && e.target.closest("button[data-action]");
+  if (b) runAction(b);
+});
+document.addEventListener("click", e => {
+  const b = e.detail === 0 && e.target.closest("button[data-action]");
+  if (b) runAction(b);
+});
+
+const dur = x => !Number.isFinite(x) ? "—" : x < 60 ? `${x.toFixed(1)} s`
+  : x < 3600 ? `${Math.floor(x / 60)} m ${String(Math.round(x % 60)).padStart(2, "0")} s`
+  : `${Math.floor(x / 3600)} h ${String(Math.floor(x % 3600 / 60)).padStart(2, "0")} m`;
+const clock = t => new Date(t).toLocaleTimeString([], {hour: "numeric", minute: "2-digit", second: "2-digit"});
+
+// One single-series sparkline on a fixed domain, so a flat line reads as "steady", not "full scale".
+function spark(ys, lo, hi, summary) {
+  ys = ys.filter(Number.isFinite);
+  if (ys.length < 2) return `<svg class="spark"></svg>`;
+  hi = Math.max(hi, ...ys); lo = Math.min(lo, ...ys);
+  const step = 300 / (ys.length - 1), y = v => (24 - (v - lo) / (hi - lo || 1) * 22).toFixed(1);
+  const pts = ys.map((v, i) => `${(i * step).toFixed(1)},${y(v)}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 300 26" preserveAspectRatio="none" role="img"><title>${esc(summary)}</title>
+    <polyline fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"
+              vector-effect="non-scaling-stroke" points="${pts}"/></svg>`;
+}
+
+function trendRow(label, ys, lo, hi, fmt, window) {
+  const now = ys.length ? ys[ys.length - 1] : null;
+  const finite = ys.filter(Number.isFinite);
+  const summary = finite.length ? `${label}, last ${window}: min ${fmt(Math.min(...finite))}, max ${fmt(Math.max(...finite))}, now ${fmt(now)}` : label;
+  return `<span>${label}</span>${spark(ys, lo, hi, summary)}<span class="now">${now == null ? "—" : fmt(now)}</span>`;
+}
+
+// The site layout the crew tool walks around in (tools/crew.py ZONES); x, y, width, height in map units.
+const ZONES = {"Assembly line": [10, 10, 430, 160], "Workshop": [450, 10, 250, 160], "Office": [710, 10, 280, 160],
+               "Warehouse": [10, 180, 560, 160], "Loading dock": [580, 180, 410, 160]};
+const isSim = w => (w.fw_version || "").startsWith("crew-sim");
+const featured = w => !isSim(w) || w.open_incident;  // real sticks and anyone in trouble get a full card
+// An incident stays on the worker until they press I'm OK (button B): red until someone responds, then amber.
+const responding = w => w.open_incident && w.incident_status === "acknowledged";
+const alarming = w => w.open_incident && !responding(w) && !w.worker_acked;  // nobody has reacted yet: pulse
+const kind = w => w.open_incident === "fall" ? "Fall" : "SOS";
+const statusOf = w => !w.open_incident ? (w.online ? "OK" : "Offline")
+  : `${kind(w)}${responding(w) ? " · supervisor responding" : w.worker_acked ? " · worker responded"
+     : w.open_incident === "fall" ? " detected" : ""}`;
+const toneOf = w => !w.open_incident ? (w.online ? "good" : "offline") : responding(w) ? "warning" : w.worker_acked ? "acked" : "critical";
+const statusColor = w => ({good: "var(--good)", offline: "var(--offline)", warning: "var(--warning)"})[toneOf(w)] || "var(--critical)";
+const badge = (tone, text) => `<span class="badge ${tone}"><i></i>${esc(text)}</span>`;
+const INCIDENT_STATUS = {open: ["critical", "Needs a response"], acknowledged: ["warning", "Supervisor responding"],
+                         resolved: ["good", "Resolved · worker said they're OK"]};
+const dB = v => v == null ? "—" : `≈${Math.round(v)} dB`;
+
+function doseText(pct) {
+  if (pct == null) return "0%";
+  const label = pct >= 100 ? "over the limit" : pct >= 50 ? "high" : "";
+  return label ? `<span class="flag${pct >= 100 ? " over" : ""}">${Math.round(pct)}% · ${label}</span>` : `${Math.round(pct)}%`;
+}
+
+function hash01(text, salt) {  // stable 0..1 from a device id, so dots don't jump between polls
+  let h = 2166136261 ^ salt;
+  for (const ch of text) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+  return ((h >>> 0) % 1000) / 1000;
+}
+
+function renderMap(workers) {
+  const zoneHtml = Object.entries(ZONES).map(([name, [x, y, w, h]]) => {
+    const here = workers.filter(k => k.zone === name && k.online);
+    const loud = here.map(k => k.noise_db).filter(Number.isFinite);
+    const avg = loud.length ? loud.reduce((a, b) => a + b, 0) / loud.length : null;
+    return `<g class="zone"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10"/>
+      <text class="zname" x="${x + 14}" y="${y + 26}">${name}</text>
+      <text x="${x + w - 14}" y="${y + 26}" text-anchor="end">${here.length} on site${avg == null ? "" : " · " + dB(avg)}</text></g>`;
+  }).join("");
+  const dots = workers.filter(k => ZONES[k.zone]).map(k => {
+    const [x, y, w, h] = ZONES[k.zone];
+    const cx = (x + 22 + hash01(k.device_id, 1) * (w - 44)).toFixed(0), cy = (y + 50 + hash01(k.device_id, 2) * (h - 66)).toFixed(0);
+    const real = !isSim(k), r = real ? 8 : 6;
+    const tip = `${k.worker_name || k.device_id} · ${statusOf(k)} · ${k.zone} · noise ${dB(k.noise_db)} · battery ${k.battery_pct ?? "?"}%`;
+    return `<g><title>${esc(tip)}</title>
+      ${alarming(k) ? `<circle class="pulse" cx="${cx}" cy="${cy}" r="${r + 4}"/>` : ""}
+      ${real ? `<circle class="ring" cx="${cx}" cy="${cy}" r="${r + 4}"/>` : ""}
+      <circle class="dot" cx="${cx}" cy="${cy}" r="${r}" fill="${statusColor(k)}"/>
+      ${real ? `<text class="dotlabel" x="${+cx + 18}" y="${+cy + 5}">${esc(k.worker_name || k.device_id)}</text>` : ""}</g>`;
+  }).join("");
+  const online = workers.filter(w => w.online).length;
+  document.getElementById("map-sub").textContent = `${online} of ${workers.length} workers online`;
+  document.getElementById("map").innerHTML =
+    `<svg class="map" viewBox="0 0 1000 350" role="img" aria-label="Site map with each worker's zone and status">${zoneHtml}${dots}</svg>
+     <div class="legend"><span><i style="background:var(--good)"></i>OK</span><span><i style="background:var(--critical)"></i>Fall or SOS</span>
+       <span><i style="background:var(--warning)"></i>Supervisor responding</span><span><i style="background:var(--offline)"></i>Offline</span>
+       <span><i style="background:transparent;box-shadow:inset 0 0 0 2px var(--ink)"></i>Real stick</span></div>`;
+}
+
+function lastAlert(cmd) {
+  if (!cmd) return "—";
+  const state = cmd.acked_at ? `acknowledged after ${dur(secs(cmd.delivered_at || cmd.created_at, cmd.acked_at))}`
+    : cmd.delivered_at ? "delivered" : "sending…";
+  return `${alertText(cmd)} · ${state}`;
+}
+
+function renderCrew(workers, last, doses) {
+  const crew = workers.filter(w => !featured(w)), el = document.getElementById("crew");
+  if (!crew.length) { el.innerHTML = ""; return; }
+  const shown = crewOpen ? crew : crew.slice(0, CREW_ROWS);
+  el.innerHTML = `<div class="tablewrap"><table><thead><tr><th>Simulated crew</th><th>Zone</th><th>Status</th><th class="num">Noise</th>
+      <th class="num">Dose · 8 h</th><th class="num">Risk · next shift</th><th class="num">Battery</th><th>Last alert</th></tr></thead>
+      <tbody>${shown.map(w => `<tr>
+      <td>${esc(w.worker_name || w.device_id)}</td><td>${esc(w.zone || "—")}</td>
+      <td>${badge(toneOf(w), statusOf(w))}</td><td class="num">${dB(w.noise_db)}</td><td class="num">${doseText(doses[w.device_id])}</td>
+      <td class="num">${riskText(riskScores[w.device_id])}</td><td class="num">${w.battery_pct ?? "?"}%</td>
+      <td class="meta last" title="${esc(lastAlert(last[w.device_id]).replace(/<[^>]+>/g, ""))}">${lastAlert(last[w.device_id])}</td></tr>`).join("")}</tbody></table></div>
+    ${crew.length > CREW_ROWS ? `<button class="ghost more" data-action="crew">${crewOpen ? "Show fewer" : `Show all ${crew.length}`}</button>` : ""}`;
+}
+
+function renderWorkers(workers, telemetry, trends, last, now, doses) {
+  const el = document.getElementById("workers");
+  document.getElementById("workers-sub").textContent = workers.length ? `${workers.filter(w => w.open_incident).length} in an incident` : "";
+  if (!workers.length) { el.innerHTML = '<div class="empty-note">Waiting for the first device to report…</div>'; return; }
+  el.innerHTML = workers.filter(featured).map(w => {
+    const cls = w.open_incident ? (responding(w) ? "responding" : alarming(w) ? "alarm" : "acked") : (w.online ? "" : "offline");
+    const risk = riskScores[w.device_id];
+    return `<div class="worker ${cls}">
+      <div class="head"><span class="name">${esc(w.worker_name || w.device_id)}</span>${badge(toneOf(w), statusOf(w))}</div>
+      <div class="meta">${esc(w.zone || "No zone")} · ${esc(w.device_id)} · last seen ${dur(Math.max(0, secs(w.lakebase_at, now)))} ago${w.fw_version ? " · fw " + esc(w.fw_version) : ""}${w.free_heap ? ` · ${(w.free_heap / 1048576).toFixed(1)} MB free` : ""}</div>
+      <div class="body">
+        <div class="trends">
+          ${trendRow("Motion", (telemetry[w.device_id] || []).map(p => p.accel_g), 0, 2, v => `${v.toFixed(2)} g`, "5 min")}
+          ${trendRow("Battery", (trends[w.device_id] || []).map(p => p.battery_pct), 0, 100, v => `${v}%`, "30 min")}
+          ${trendRow("Signal", (trends[w.device_id] || []).map(p => p.rssi), -100, -30, v => `${v} dBm`, "30 min")}
+          ${trendRow("Noise", (trends[w.device_id] || []).map(p => p.noise_db), 30, 110, dB, "30 min")}
+        </div>
+        <dl class="facts">
+          <dt>Noise dose · 8 h</dt><dd>${doseText(doses[w.device_id])}</dd>
+          <dt>Risk · next shift</dt><dd>${riskText(risk)}${risk ? `<div class="meta">${esc((risk.top_factors || []).join(" · "))}</div>` : ""}</dd>
+          <dt>Last alert</dt><dd>${lastAlert(last[w.device_id])}</dd>
+        </dl>
+      </div>
+      <div class="actions">
+        ${w.incident_status === "open" ? `<button class="danger" data-action="ack" data-id="${esc(w.incident_id)}">Acknowledge</button>` : ""}
+        <button class="${w.incident_status === "open" ? "" : "primary"}" data-action="command" data-dev="${esc(w.device_id)}" data-cmd="help_coming" data-msg="Help is on the way">Help is coming</button>
+        <button data-action="command" data-dev="${esc(w.device_id)}" data-cmd="evacuate" data-msg="Evacuate now">Evacuate</button>
+        <button class="ghost" data-action="compose" data-dev="${esc(w.device_id)}">Message…</button>
+      </div></div>`;
+  }).join("");
+}
+
+// Two lanes per incident: the alarm fast lane (stick -> App -> Lakebase -> screen) and the Zerobus lane
+// (stick -> Zerobus -> Delta -> stream -> Lakebase), which confirms the incident in the lakehouse.
+function lanes(i) {
+  const ok = x => Number.isFinite(x) && x >= 0;
+  const screen = secs(i.event_ts, seenAt[i.event_id]);
+  const toDelta = i.landed_at ? secs(i.event_ts, i.landed_at) : NaN;
+  const toLake = i.landed_at && i.confirmed_at ? secs(i.landed_at, i.confirmed_at) : NaN;
+  if (!ok(screen)) return "";
+  const span = Math.max(screen, ok(toDelta) && ok(toLake) ? toDelta + toLake : 0, 8);  // shared 8 s floor keeps bars comparable
+  const w = x => `width:${(x / span * 100).toFixed(1)}%`;
+  const lake = ok(toDelta) && ok(toLake)
+    ? `<div class="bar"><span class="delta" style="${w(toDelta)}"></span><span class="lake" style="${w(toLake)}"></span></div>
+       <span>${toDelta.toFixed(1)} s to Delta · +${toLake.toFixed(1)} s to Lakebase</span>`
+    : `<div class="bar"></div><span>on its way through Zerobus…</span>`;
+  return `<div class="lane"><span>To console</span><div class="bar"><span class="fast" style="${w(screen)}"></span></div>
+            <span><b>${screen.toFixed(1)} s</b></span></div>
+          ${zerobusLane ? `<div class="lane"><span>Lakehouse</span>${lake}</div>` : ""}`;
+}
+
+function renderIncidents(incidents, now) {
+  const el = document.getElementById("incidents");
+  incidents.forEach(i => { seenAt[i.event_id] ??= primed ? now : i.lakebase_at; });
+  primed = true;
+  if (!incidents.length) { el.innerHTML = '<div class="empty-note">No incidents in the last hour.</div>'; return; }
+  el.innerHTML = incidents.map(i => {
+    const [tone, text] = INCIDENT_STATUS[i.status] || ["offline", i.status];
+    const timings = [
+      i.worker_ack_at ? `worker pressed M5 after ${dur(secs(i.event_ts, i.worker_ack_at))}` : "",
+      i.ack_at ? `acknowledged by ${esc(i.ack_by)} after ${dur(secs(i.event_ts, i.ack_at))}` : "",
+      i.resolved_at ? `worker OK after ${dur(secs(i.event_ts, i.resolved_at))}` : ""].filter(Boolean).join(" · ");
+    return `<div class="incident">
+      <div class="top">${badge(tone, i.type === "fall" ? "Fall" : "SOS")}<span class="who">${esc(i.worker_name || i.device_id)}</span>
+        <span class="when">${clock(i.event_ts)}</span></div>
+      <div class="meta">${esc(text)}${i.zone ? ` · ${esc(i.zone)}` : ""}${i.peak_g ? ` · peak ${i.peak_g.toFixed(1)} g` : ""}</div>
+      ${timings ? `<div class="meta">${timings}</div>` : ""}
+      ${lanes(i)}
+      ${i.status === "open" ? `<div class="actions"><button class="danger" data-action="ack" data-id="${esc(i.event_id)}">Acknowledge</button></div>` : ""}
+    </div>`;
+  }).join("");
+}
+
+function renderKpis(k, workers) {
+  const tile = (label, value, sub, alert) => `<div class="kpi${alert ? " alert" : ""}"><div class="label">${label}</div>
+    <div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+  const online = workers.filter(w => w.online).length;
+  document.getElementById("kpis").innerHTML =
+    tile("Workers online", `${online}<span class="meta"> / ${workers.length}</span>`, "heartbeat in the last 20 s") +
+    tile("Incidents", k.incidents_24h ?? "—", "falls and SOS · last 24 h") +
+    tile("Unresolved", k.unresolved_now ?? "—", k.unresolved_now > 0 ? "waiting for the worker's I'm OK" : "none open", k.unresolved_now > 0) +
+    tile("Time to acknowledge", dur(k.avg_ack_s ?? NaN), "supervisor average · 24 h") +
+    tile("Time to worker OK", dur(k.avg_resolve_s ?? NaN), "worker average · 24 h");
+}
+
+// Nightly model output (jobs/nightly_risk.py). Text labels carry the level, the bar carries the magnitude.
+const riskLevel = r => r.risk >= 0.3 ? "High" : r.risk >= 0.1 ? "Medium" : "Low";
+const riskText = r => !r ? "—" : `<span class="${riskLevel(r) === "High" ? "flag over" : ""}">${riskLevel(r)} · ${Math.round(r.risk * 100)}%</span>`;
+
+function renderRisk(scores) {
+  const el = document.getElementById("risk"), rows = Object.values(scores).sort((a, b) => b.risk - a.risk);
+  if (!rows.length) { el.innerHTML = '<div class="empty-note">Scores appear after the nightly job runs.</div>'; return; }
+  const m = rows[0];
+  el.innerHTML = rows.slice(0, 5).map(r => `<div class="riskrow">
+      <span class="who">${esc(r.worker_name || r.device_id)} <span class="meta">· ${esc(r.zone || "")}</span></span>
+      <span class="val${riskLevel(r) === "High" ? " high" : ""}">${riskLevel(r)} · ${Math.round(r.risk * 100)}%</span>
+      <div class="riskbar" title="${Math.round(r.risk * 100)}%"><span style="width:${Math.max(2, r.risk * 100).toFixed(0)}%"></span></div>
+      <div class="meta why">${esc((r.top_factors || []).join(" · "))}</div></div>`).join("") +
+    `<div class="meta modelnote">Model v${esc(m.model_version || "?")} · holdout AUC ${(m.holdout_auc ?? NaN).toFixed(2)}
+      · ${m.trained_shifts ?? "?"} shifts (simulated history + live data) · scored ${new Date(m.scored_at).toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"})}</div>`;
+}
+
+// A broadcast is one INSERT (one row per worker, same created_at), so consecutive matching rows are one alert.
+function groupAlerts(commands) {
+  const groups = [];
+  for (const c of commands) {
+    const key = [c.created_at, c.command, c.message, c.created_by].join("|"), g = groups[groups.length - 1];
+    if (g && g.key === key) g.rows.push(c); else groups.push({key, rows: [c]});
+  }
+  return groups;
+}
+
+function renderAlerts(commands, workers) {
+  const el = document.getElementById("alerts");
+  if (!commands.length) { el.innerHTML = '<div class="empty-note">No alerts sent yet.</div>'; return; }
+  const name = Object.fromEntries(workers.map(w => [w.device_id, w.worker_name || w.device_id]));
+  el.innerHTML = `<table><thead><tr><th>Sent</th><th>To</th><th>Alert</th><th>Sent by</th>
+      <th>Reached the stick</th><th>Worker acknowledged</th></tr></thead><tbody>${groupAlerts(commands).slice(0, ALERT_GROUPS).map(({rows}) => {
+    const c = rows[0], n = rows.length;
+    const delivered = rows.filter(r => r.delivered_at).length, acked = rows.filter(r => r.acked_at).length;
+    const to = n > 1 ? `Everyone <span class="meta">(${n})</span>` : esc(name[c.device_id] || c.device_id);
+    const reach = n > 1 ? `${delivered} / ${n}` : c.delivered_at ? `after ${dur(secs(c.created_at, c.delivered_at))}` : "not yet";
+    const ack = n > 1 ? `${acked} / ${n}` : c.acked_at ? `${dur(secs(c.delivered_at || c.created_at, c.acked_at))} after it arrived`
+      : c.delivered_at ? "waiting…" : "—";
+    return `<tr><td class="time">${clock(c.created_at)}</td><td>${to}</td><td>${alertText(c)}</td>
+      <td class="meta">${esc(c.created_by || "")}</td><td>${reach}</td><td>${ack}</td></tr>`;
+  }).join("")}</tbody></table>`;
+}
+
+function render() {
+  const s = state;
+  if (!s) return;
+  renderKpis(s.kpis || {}, s.workers);
+  updateRecipients(s.workers);
+  renderMap(s.workers);
+  const last = s.last_commands || {};
+  riskScores = s.risk_scores || {};
+  renderWorkers(s.workers, s.telemetry, s.trends || {}, last, s.now, s.noise_dose || {});
+  renderCrew(s.workers, last, s.noise_dose || {});
+  renderAlerts(s.commands, s.workers);
+  renderRisk(s.risk_scores || {});
+  zerobusLane = s.zerobus_lane !== false;
+  document.getElementById("flow-zerobus").hidden = !zerobusLane;
+  document.getElementById("flow-app").hidden = zerobusLane;
+  renderIncidents(s.incidents, s.now);
+}
+
+async function tick() {
+  const live = document.getElementById("live"), clockEl = document.getElementById("clock");
+  try {
+    state = await api(seriesFor === null ? "/api/state" : `/api/state?series=${encodeURIComponent(seriesFor.join(","))}`);
+    seriesFor = state.workers.filter(featured).map(w => w.device_id);  // only cards draw sparklines
+    live.classList.remove("down");
+    clockEl.textContent = `Live · ${clock(state.now)}`;
+    render();
+  } catch (e) {
+    live.classList.add("down");
+    clockEl.textContent = "Reconnecting…";
+  }
+  setTimeout(tick, 1000);
+}
+tick();
+</script>
+</body>
+</html>

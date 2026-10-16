@@ -1,0 +1,22 @@
+resources:
+  apps:
+    console:
+      name: worker-safety-console
+      source_code_path: ../app
+      description: "Worker safety: the device API and the supervisor console, on Lakebase"
+      resources:
+        - name: lakebase
+          description: "Live worker state, incidents and device commands"
+          postgres:
+            branch: ${resources.postgres_projects.worker_safety.id}/branches/production
+            database: ${resources.postgres_databases.safety.id}
+            permission: CAN_CONNECT_AND_CREATE
+        - name: genie
+          description: "Worker Safety Assistant, embedded in the console (it runs as the signed-in supervisor)"
+          genie_space:
+            name: "Worker Safety Assistant"
+            space_id: ${resources.genie_spaces.safety_genie.id}
+            permission: CAN_VIEW
+      permissions:
+        - service_principal_name: ${var.device_sp_app_id}
+          level: CAN_USE

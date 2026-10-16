@@ -1,0 +1,29 @@
+resources:
+  postgres_projects:
+    worker_safety:
+      project_id: ${var.pg_project}
+      display_name: "Worker safety demo"
+      pg_version: 17
+      default_endpoint_settings:
+        autoscaling_limit_min_cu: 0.5
+        autoscaling_limit_max_cu: 1
+
+  postgres_roles:
+    owner:
+      parent: ${resources.postgres_projects.worker_safety.id}/branches/production
+      role_id: app-owner
+      postgres_role: app_owner
+
+  postgres_databases:
+    safety:
+      parent: ${resources.postgres_projects.worker_safety.id}/branches/production
+      database_id: worker-safety
+      postgres_database: worker_safety
+      role: ${resources.postgres_roles.owner.id}
+
+  # The Lakebase database as a Unity Catalog catalog, so the nightly job can MERGE its tables into Delta.
+  postgres_catalogs:
+    safety_catalog:
+      catalog_id: worker_safety_lakebase
+      branch: ${resources.postgres_projects.worker_safety.id}/branches/production
+      postgres_database: ${resources.postgres_databases.safety.postgres_database}

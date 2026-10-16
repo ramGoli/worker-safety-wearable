@@ -1,0 +1,10 @@
+command: ["python", "-m", "backend.server"]
+env:
+  - name: DEVICE_PRINCIPAL
+    value: "${DEVICE_CLIENT_ID}"
+  - name: STREAM_PG_ROLE
+    value: "${DEPLOYER_EMAIL}"
+  - name: ZEROBUS_LANE
+    value: "${ZEROBUS_LANE}"
+  - name: GENIE_SPACE_ID
+    valueFrom: genie

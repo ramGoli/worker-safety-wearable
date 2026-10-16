@@ -1,0 +1,21 @@
+# secrets
+device/config.py
+.env
+*.secret
+
+# python
+__pycache__/
+.venv/
+.pytest_cache/
+
+# databricks
+.databricks/
+
+# frontend
+node_modules/
+app/frontend/dist/
+config/demo.env
+app/app.yaml
+device/roots.der
+config/*.env
+!config/demo.env.example

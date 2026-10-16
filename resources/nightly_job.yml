@@ -1,0 +1,32 @@
+resources:
+  jobs:
+    nightly_risk:
+      name: worker-safety-nightly-risk
+      description: "Lakebase -> Delta history, shift features, retrain + register the next-shift risk model, score workers back into Lakebase"
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"
+        timezone_id: America/New_York
+        pause_status: UNPAUSED
+      tasks:
+        - task_key: nightly
+          environment_key: default
+          spark_python_task:
+            python_file: ../jobs/nightly_risk.py
+            parameters:
+              - --catalog
+              - ${var.catalog}
+              - --lakebase-catalog
+              - ${resources.postgres_catalogs.safety_catalog.catalog_id}
+              - --pg-project
+              - ${var.pg_project}
+              - --pg-database
+              - worker_safety
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+            # scikit-learn 1.6, numpy 2.1 and mlflow-skinny 2.22 come with environment 4; installing full mlflow
+            # on top swaps native libraries under the running process and it aborts.
+            dependencies:
+              - "pg8000>=1.31"
+              - "databricks-sdk>=0.89.0"

@@ -1,0 +1,29 @@
+# Optional Zerobus lane (paid workspaces): Delta device_events -> Lakebase. Not used on Free Edition.
+resources:
+  jobs:
+    stream_to_lakebase_serverless:
+      name: worker-safety-stream-to-lakebase-serverless
+      tasks:
+        - task_key: stream
+          environment_key: default
+          spark_python_task:
+            python_file: ../stream/stream_to_lakebase.py
+            parameters:
+              - --table
+              - ${var.catalog}.worker_safety.device_events
+              - --checkpoint
+              - /Volumes/${var.catalog}/worker_safety/checkpoints/stream_to_lakebase_serverless
+              - --pg-project
+              - ${var.pg_project}
+              - --pg-database
+              - worker_safety
+              - --trigger
+              - available-now-loop
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+            dependencies:
+              - "psycopg[binary]>=3.2"
+              - "databricks-sdk>=0.89.0"
+

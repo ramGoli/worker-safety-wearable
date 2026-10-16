@@ -1,0 +1,104 @@
+# Genie space the console's "Ask" box talks to (app/backend/genie.py). It reads the live Lakebase tables through
+# their Unity Catalog registration (resources/lakebase.yml), so answers are as fresh as the console.
+# The example SQL is checked by tests/test_genie_space.py and run for real by tests/integration/test_genie_live.py.
+resources:
+  genie_spaces:
+    safety_genie:
+      title: "Worker Safety Assistant"
+      description: "Ask about worker risk, incidents, noise exposure and devices on the worker-safety demo site."
+      warehouse_id: ${var.warehouse_id}
+      serialized_space:
+        version: 2
+        config:
+          sample_questions:
+            - id: "5a000000000000000000000000000001"
+              question: ["Who is most likely to get injured today?"]
+            - id: "5a000000000000000000000000000002"
+              question: ["Who has the highest noise dose today?"]
+            - id: "5a000000000000000000000000000003"
+              question: ["Which incidents are still open, and for how long?"]
+            - id: "5a000000000000000000000000000004"
+              question: ["What is the average time to acknowledge by zone this week?"]
+            - id: "5a000000000000000000000000000005"
+              question: ["Whose battery is low, or who has gone offline?"]
+        data_sources:
+          tables:
+            - identifier: worker_safety_lakebase.safety.device_commands
+            - identifier: worker_safety_lakebase.safety.incidents
+            - identifier: worker_safety_lakebase.safety.risk_scores
+            - identifier: worker_safety_lakebase.safety.telemetry
+            - identifier: worker_safety_lakebase.safety.worker_status
+        instructions:
+          text_instructions:
+            - id: "7e000000000000000000000000000001"
+              content:
+                - |
+                  * Each worker on the site wears a safety stick. stick-01 is the real wearable; crew-01 to crew-24 are simulated workers.
+                  * Always name workers by worker_name, not device_id, unless asked for the device. Refer to a worker by name or as they/them, never he or she.
+                  * Zones are: Assembly line, Workshop, Office, Warehouse, Loading dock.
+                  * "Most likely to get injured", "at risk", "highest risk", "risk today" or "risk next shift" means risk_scores.risk: the probability (0 to 1) of a fall or SOS on the worker's next shift. A logistic regression model retrains every night at 02:00 New York time, mostly on simulated history. Show it as a percentage with worker_name, zone and top_factors (the reasons). High is 30% or more, Medium is 10% or more, otherwise Low.
+                  * risk_scores always holds the latest scores, for today's (next) shift: use them as they are for "today" without filtering on scored_at, and don't ask which day is meant.
+                  * incidents: type is 'fall' or 'sos'. status 'open' means nobody has responded, 'acknowledged' means a supervisor clicked Acknowledge (ack_by, ack_at), and 'resolved' means the worker pressed I'm OK (resolved_at). An incident is still open (unresolved) while status <> 'resolved'. worker_ack_at is when the worker pressed the M5 button on the stick to say they've seen it.
+                  * Time to acknowledge is ack_at - event_ts. Time to worker OK is resolved_at - event_ts. Report durations in seconds or minutes.
+                  * telemetry has one heartbeat per worker every 3 seconds (accel_g, noise_db, battery_pct, rssi) and keeps 7 days.
+                  * Noise dose follows the NIOSH limit: only samples of 80 dB or more count, each 3-second sample adds 3 * 2^((noise_db - 85) / 3) seconds, and dose % = that sum / (8 * 3600) * 100 over the last 8 hours. 100% is the daily limit. For noise dose, "today" or "this shift" means the last 8 hours.
+                  * worker_status has one row per worker with its latest heartbeat. A worker is online if lakebase_at is within the last 20 seconds, otherwise offline. Low battery means battery_pct below 30.
+                  * device_commands are alerts supervisors sent to the sticks: command is help_coming, evacuate, all_clear or message. delivered_at is when it reached the stick and acked_at is when the worker pressed M5. A broadcast creates one row per worker.
+                  * Timestamps are stored in UTC. "Today" means the calendar day in America/New_York, and times should be shown in America/New_York, formatted with date_format(..., 'MMM d, h:mm a').
+          example_question_sqls:
+            - id: "e0000000000000000000000000000001"
+              question: ["Who is most likely to get injured today?"]
+              sql:
+                - |
+                  SELECT worker_name, zone, round(risk * 100) AS risk_pct,
+                         array_join(top_factors, ' · ') AS top_reasons,
+                         date_format(from_utc_timestamp(scored_at, 'America/New_York'), 'MMM d, h:mm a') AS scored_new_york_time
+                    FROM worker_safety_lakebase.safety.risk_scores
+                   ORDER BY risk DESC
+                   LIMIT 5
+            - id: "e0000000000000000000000000000002"
+              question: ["Who has the highest noise dose today?"]
+              sql:
+                - |
+                  SELECT w.worker_name, w.zone,
+                         round(sum(power(2, (t.noise_db - 85) / 3.0)) * 3 / (8 * 3600) * 100, 1) AS noise_dose_pct,
+                         round(max(t.noise_db), 1) AS loudest_db
+                    FROM worker_safety_lakebase.safety.telemetry t
+                    JOIN worker_safety_lakebase.safety.worker_status w ON w.device_id = t.device_id
+                   WHERE t.noise_db >= 80 AND t.event_ts > current_timestamp() - INTERVAL 8 HOURS
+                   GROUP BY w.worker_name, w.zone
+                   ORDER BY noise_dose_pct DESC
+                   LIMIT 10
+            - id: "e0000000000000000000000000000003"
+              question: ["Which incidents are still open, and for how long?"]
+              sql:
+                - |
+                  SELECT worker_name, zone, type, status,
+                         date_format(from_utc_timestamp(event_ts, 'America/New_York'), 'MMM d, h:mm a') AS new_york_time,
+                         round(timestampdiff(SECOND, event_ts, current_timestamp()) / 60.0, 1) AS minutes_open,
+                         ack_by
+                    FROM worker_safety_lakebase.safety.incidents
+                   WHERE status <> 'resolved'
+                   ORDER BY event_ts
+            - id: "e0000000000000000000000000000004"
+              question: ["What is the average time to acknowledge by zone this week?"]
+              sql:
+                - |
+                  SELECT zone, count(*) AS incidents,
+                         round(avg(timestampdiff(SECOND, event_ts, ack_at)), 1) AS avg_seconds_to_acknowledge,
+                         round(avg(timestampdiff(SECOND, event_ts, resolved_at)), 1) AS avg_seconds_to_worker_ok
+                    FROM worker_safety_lakebase.safety.incidents
+                   WHERE event_ts >= current_timestamp() - INTERVAL 7 DAYS
+                   GROUP BY zone
+                   ORDER BY incidents DESC
+            - id: "e0000000000000000000000000000005"
+              question: ["Whose battery is low, or who has gone offline?"]
+              sql:
+                - |
+                  SELECT worker_name, zone, battery_pct,
+                         CASE WHEN lakebase_at < current_timestamp() - INTERVAL 20 SECONDS THEN 'offline' ELSE 'online' END
+                           AS connection,
+                         round(timestampdiff(SECOND, lakebase_at, current_timestamp()) / 60.0, 1) AS minutes_since_last_seen
+                    FROM worker_safety_lakebase.safety.worker_status
+                   WHERE battery_pct < 30 OR lakebase_at < current_timestamp() - INTERVAL 20 SECONDS
+                   ORDER BY connection DESC, battery_pct
